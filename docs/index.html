@@ -1,0 +1,332 @@
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>gRPCのクライアントが絡むテスト</title>
+    <meta charset='utf-8'>
+    <script>
+      var notesEnabled =  false ;
+    </script>
+    <script src='static/slides.js'></script>
+
+    
+
+    <script>
+      
+      if (window["location"] && window["location"]["hostname"] == "talks.golang.org") {
+        var _gaq = _gaq || [];
+        _gaq.push(["_setAccount", "UA-11222381-6"]);
+        _gaq.push(["b._setAccount", "UA-49880327-6"]);
+        window.trackPageview = function() {
+          _gaq.push(["_trackPageview", location.pathname+location.hash]);
+          _gaq.push(["b._trackPageview", location.pathname+location.hash]);
+        };
+        window.trackPageview();
+        window.trackEvent = function(category, action, opt_label, opt_value, opt_noninteraction) {
+          _gaq.push(["_trackEvent", category, action, opt_label, opt_value, opt_noninteraction]);
+          _gaq.push(["b._trackEvent", category, action, opt_label, opt_value, opt_noninteraction]);
+        };
+      }
+    </script>
+  </head>
+
+  <body style='display: none'>
+
+    <section class='slides layout-widescreen'>
+
+      <article>
+        <h1>gRPCのクライアントが絡むテスト</h1>
+        <h3>golang.tokyo #28</h3>
+        <h3>4 December 2019</h3>
+        
+          <div class="presenter">
+            
+  
+  <p>
+    dice_zu(daisuzu)
+  </p>
+  
+
+          </div>
+        
+      </article>
+
+  
+  
+      <article >
+      
+        <h3>gRPCのクライアント</h3>
+        
+  
+  <p>
+    自分たちが作っているgRPCサーバのクライアントとか、
+<br>
+
+    実は3rd-partyパッケージの中で使われていたりとか。
+  </p>
+  
+
+  <ul>
+  
+    <li>cloud.google.com/go など</li>
+  
+  </ul>
+
+      
+      <span class="pagenumber">2</span>
+      </article>
+  
+  
+  
+      <article >
+      
+        <h3>テストのやり方</h3>
+        
+  
+  <p>
+    1. DIする
+<br>
+
+    2. ダミーサーバを使う
+<br>
+
+    3. リクエストとレスポンスを記録/再生する
+  </p>
+  
+
+      
+      <span class="pagenumber">3</span>
+      </article>
+  
+  
+  
+      <article >
+      
+        <h3>1. DIする</h3>
+        
+  
+  <p>
+    自分のコードは <i>pb.SearchClient</i> インタフェースを満たす <i>cli</i> を渡せればOK。
+  </p>
+  
+
+  
+  <div class="code"><pre>type myHandler struct{ cli pb.SearchClient }
+
+func (h *myHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    // rからreqを作ったり
+    reply, err := h.cli.Search(ctx, req)
+    // エラーハンドリングしたり、replyを加工したり
+}</pre></div>
+  
+
+  
+  <p>
+    <i>cli</i> に手を出せない3rd-partyパッケージなどはメソッドごと差し替える必要がある。
+  </p>
+  
+
+  
+  <div class="code"><pre>func (c *Client) Run(ctx context.Context, q *Query) *Result {
+    // qを色々な処理(バリデーションとか)をしてreqに変換する
+    resp, err := c.cli.Search(ctx, req)
+    // respとerrを色々な処理をしてResult型に変換する
+}</pre></div>
+  
+
+  
+  <p>
+    その場合、 <b>色々な処理</b> はテストでスキップされてしまう...
+  </p>
+  
+
+      
+      <span class="pagenumber">4</span>
+      </article>
+  
+  
+  
+      <article >
+      
+        <h3>2. ダミーサーバを使う</h3>
+        
+  
+  <p>
+    gRPCのサーバは比較的簡単に作れる。
+  </p>
+  
+
+  <ul>
+  
+    <li><i>data</i> を使ってそれっぽく振る舞うサーバ</li>
+  
+  </ul>
+
+  
+  <div class="code"><pre>type fakeServer struct {
+    cli pb.ServiceServer // ⬅️のinterfaceに対応するメソッドを実装する
+
+    data map[string]interface{}
+}</pre></div>
+  
+
+  <ul>
+  
+    <li><i>f</i> でレスポンスを変更できるサーバ</li>
+  
+  </ul>
+
+  
+  <div class="code"><pre>type mockServer struct {
+    cli pb.ServiceServer // ⬅️のinterfaceに対応するメソッドを実装する
+
+    f func(context.Context, *pb.Request) (*pb.Response, error)
+}</pre></div>
+  
+
+  <ul>
+  
+    <li>GCP(cloud.google.com/go) にはエミュレータが提供されているパッケージもある</li>
+  
+  </ul>
+
+  
+  <p>
+    あとはテスト時に接続先を変えるだけ。ただコード量は多くなりがち...
+  </p>
+  
+
+      
+      <span class="pagenumber">5</span>
+      </article>
+  
+  
+  
+      <article >
+      
+        <h3>3. リクエストとレスポンスを記録/再生する</h3>
+        
+  
+  <p>
+    <a href="https://godoc.org/cloud.google.com/go/rpcreplay" target="_blank">cloud.google.com/go/rpcreplay</a> を使う。
+  </p>
+  
+
+  <ul>
+  
+    <li>記録するとき</li>
+  
+  </ul>
+
+  
+  <div class="code"><pre>r, err := rpcreplay.NewRecorder(&#34;service.replay&#34;, nil)
+if err != nil { ... }
+defer func() {
+    if err := r.Close(); err != nil { ... }
+}()</pre></div>
+  
+
+  <ul>
+  
+    <li>再生するとき</li>
+  
+  </ul>
+
+  
+  <div class="code"><pre>r, err := rpcreplay.NewReplayer(&#34;service.replay&#34;)
+if err != nil { ... }
+defer r.Close()</pre></div>
+  
+
+  
+  <p>
+    あとは <i>r.DialOptions()</i> を使ってgRPCクライアントを作るだけ。
+  </p>
+  
+
+      
+      <span class="pagenumber">6</span>
+      </article>
+  
+  
+  
+      <article >
+      
+        <h3>gRPCクライアントを作る時のシグネチャ</h3>
+        
+  
+  <p>
+    こういう形式になっていますよね?
+  </p>
+  
+
+  
+  <div class="code"><pre>func NewClient(addr string, opts ...grpc.DialOption) (pb.ServiceClient, error) {
+    conn, err := grpc.Dial(addr, opts...)
+    if err != nil {
+        return nil, err
+    }
+    return pb.NewServiceClient(conn), nil
+}</pre></div>
+  
+
+  
+  <p>
+    もしなっていなくても <i>...grpc.DialOption</i> を足す分には既存コードに影響ないはず！
+  </p>
+  
+
+      
+      <span class="pagenumber">7</span>
+      </article>
+  
+  
+  
+      <article >
+      
+        <h2>効率よく、安心を得られるテストを！</h2>
+      
+      <span class="pagenumber">8</span>
+      </article>
+  
+  
+
+      <article>
+        <h3>Thank you</h3>
+        
+          <div class="presenter">
+            
+  
+  <p>
+    dice_zu(daisuzu)
+  </p>
+  
+<p class="link"><a href="http://twitter.com/dice_zu" target="_blank">@dice_zu</a></p><p class="link"><a href="https://github.com/daisuzu" target="_blank">https://github.com/daisuzu</a></p><p class="link"><a href="https://daisuzu.hatenablog.com" target="_blank">https://daisuzu.hatenablog.com</a></p>
+          </div>
+        
+      </article>
+
+    </section>
+
+    <div id="help">
+      Use the left and right arrow keys or click the left and right
+      edges of the page to navigate between slides.<br>
+      (Press 'H' or navigate to hide this message.)
+    </div>
+
+    
+    <script src='play.js'></script>
+    
+
+    <script>
+      (function() {
+        
+        if (window["location"] && window["location"]["hostname"] == "talks.golang.org") {
+          var ga = document.createElement("script"); ga.type = "text/javascript"; ga.async = true;
+          ga.src = ("https:" == document.location.protocol ? "https://ssl" : "http://www") + ".google-analytics.com/ga.js";
+          var s = document.getElementsByTagName("script")[0]; s.parentNode.insertBefore(ga, s);
+        }
+      })();
+    </script>
+  </body>
+</html>

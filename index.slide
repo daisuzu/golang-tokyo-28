@@ -1,0 +1,103 @@
+gRPCのクライアントが絡むテスト
+golang.tokyo #28
+4 Dec 2019
+
+dice_zu(daisuzu)
+@dice_zu
+https://github.com/daisuzu
+https://daisuzu.hatenablog.com
+
+* gRPCのクライアント
+
+自分たちが作っているgRPCサーバのクライアントとか、
+実は3rd-partyパッケージの中で使われていたりとか。
+
+- cloud.google.com/go など
+
+* テストのやり方
+
+1. DIする
+2. ダミーサーバを使う
+3. リクエストとレスポンスを記録/再生する
+
+* 1. DIする
+
+自分のコードは _pb.SearchClient_ インタフェースを満たす _cli_ を渡せればOK。
+
+	type myHandler struct{ cli pb.SearchClient }
+
+	func (h *myHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+		// rからreqを作ったり
+		reply, err := h.cli.Search(ctx, req)
+		// エラーハンドリングしたり、replyを加工したり
+	}
+
+_cli_ に手を出せない3rd-partyパッケージなどはメソッドごと差し替える必要がある。
+
+	func (c *Client) Run(ctx context.Context, q *Query) *Result {
+		// qを色々な処理(バリデーションとか)をしてreqに変換する
+		resp, err := c.cli.Search(ctx, req)
+		// respとerrを色々な処理をしてResult型に変換する
+	}
+
+その場合、 *色々な処理* はテストでスキップされてしまう...
+
+* 2. ダミーサーバを使う
+
+gRPCのサーバは比較的簡単に作れる。
+
+- _data_ を使ってそれっぽく振る舞うサーバ
+
+	type fakeServer struct {
+		cli pb.ServiceServer // ⬅️のinterfaceに対応するメソッドを実装する
+
+		data map[string]interface{}
+	}
+
+- _f_ でレスポンスを変更できるサーバ
+
+	type mockServer struct {
+		cli pb.ServiceServer // ⬅️のinterfaceに対応するメソッドを実装する
+
+		f func(context.Context, *pb.Request) (*pb.Response, error)
+	}
+
+- GCP(cloud.google.com/go) にはエミュレータが提供されているパッケージもある
+
+あとはテスト時に接続先を変えるだけ。ただコード量は多くなりがち...
+
+* 3. リクエストとレスポンスを記録/再生する
+
+[[https://godoc.org/cloud.google.com/go/rpcreplay][cloud.google.com/go/rpcreplay]] を使う。
+
+- 記録するとき
+
+	r, err := rpcreplay.NewRecorder("service.replay", nil)
+	if err != nil { ... }
+	defer func() {
+		if err := r.Close(); err != nil { ... }
+	}()
+
+- 再生するとき
+
+	r, err := rpcreplay.NewReplayer("service.replay")
+	if err != nil { ... }
+	defer r.Close()
+
+あとは _r.DialOptions()_ を使ってgRPCクライアントを作るだけ。
+
+* gRPCクライアントを作る時のシグネチャ
+
+こういう形式になっていますよね?
+
+	func NewClient(addr string, opts ...grpc.DialOption) (pb.ServiceClient, error) {
+		conn, err := grpc.Dial(addr, opts...)
+		if err != nil {
+			return nil, err
+		}
+		return pb.NewServiceClient(conn), nil
+	}
+
+もしなっていなくても _...grpc.DialOption_ を足す分には既存コードに影響ないはず！
+
+* 効率よく、安心を得られるテストを！
